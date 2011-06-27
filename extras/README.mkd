@@ -1,13 +1,69 @@
 # Purpose of the `/extras` directory
 
-This directory holds scripts which may have any combination of the following 
-properties: experimental, reliant on non-POSIX tools or languages, or 
+This directory holds scripts which may have any combination of the following
+properties: experimental, reliant on non-POSIX tools or languages, or
 implementing a feature that is unlikely to be widely useful.
 
-`todone-view` will print a formatted list of completed tasks in 
+`todone-view` will print a formatted list of completed tasks in
 reverse-chronological order, with a different section for each day.
 
-`todone-resort` will re-sort the todone file by task completion time. Under 
-normal usage of the `todone` command this will be unnecessary, but it is 
-useful if you manually edited completion times in the todone file and don't 
+`todone-resort` will re-sort the todone file by task completion time. Under
+normal usage of the `todone` command this will be unnecessary, but it is
+useful if you manually edited completion times in the todone file and don't
 want to manually reorder lines.
+
+`todo-sync` will perform 2-way synchronization with google tasks.
+
+# todo-sync
+
+## Installation
+
+Download and install [Google APIs Client Library for Python](http://code.google.com/p/google-api-python-client/):
+
+	$ wget http://google-api-python-client.googlecode.com/files/google-api-python-client-1.0beta1.tar.gz
+	$ tar xvvf google-api-python-client-1.0beta1.tar.gz
+	$ cd google-api-python-client-1.0beta1/
+	$ sudo python setup.py install
+
+Install python script to your bin directory
+
+	$ sudo cp todo-sync_py /usr/local/bin/todo-sync
+
+## Configuration
+
+Copy sh-todo.gtask to your home directory
+
+	$ cp sh-todo.gtask ~/.sh-todo.gtask
+
+Edit .sh-todo.gtask. Set `tasklist-name` to the name of your todo list.
+If you want to use default Google Task list, you should set it to `@default` value.
+
+Use `gtask-todo`, `gtask-todone` and `gtask-todone-archive` instead of original scripts. You can bind them as aliases:
+
+	alias todo=`gtask-todo`
+	alias todone=`gtask-todone`
+	alias todone-archive=`gtask-todone-archive`
+
+Or you can rename them:
+
+	$ mv todo todo-original
+	$ mv todone todone-original
+	$ mv todone-archive todone-archive-original
+	$ cat gtask-todo | sed -e 's/^\(todo[^ ]*\)/\1-original/g' > todo
+	$ cat gtask-todone | sed -e 's/^\(todo[^ ]*\)/\1-original/g' > todone
+	$ cat gtask-todone-archive | sed -e 's/^\(todo[^ ]*\)/\1-original/g' > todone-archive
+
+## Synchronization
+
+Execute script:
+
+	$ todo-sync
+
+It will download new or updated tasks from google account. Then it will upload any local changes to the server
+
+The script will ask to perform google account authentication at first execution.
+Then google api library create encrypted file `~/.sh-todo.gtask.tasks.dat`. It will store your google account access key.
+
+## Author
+
+Alexander Fedora <alexander.fedora@gmail.com>

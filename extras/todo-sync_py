@@ -1,0 +1,400 @@
+#!/usr/bin/python
+
+import gflags
+import httplib2
+import ConfigParser
+import io
+import os
+import time
+import codecs
+
+from apiclient.discovery import build
+from oauth2client.file import Storage
+from oauth2client.client import OAuth2WebServerFlow
+from oauth2client.tools import run
+
+homeDirectory = os.path.expanduser('~/')
+todoConfigPath = os.path.expanduser('~/.sh-todo')
+configPath = os.path.expanduser('~/.sh-todo.gtask')
+
+RFC3339TimestampFormat='%Y-%m-%dT%H:%M:%S.%fZ'
+RFC3339TimestampFormatSave='%Y-%m-%dT%H:%M:%S.000Z'
+OriginalTimestampFormat='%Y-%m-%d %R'
+
+def readConfig():
+	global config
+	global todoConfig
+	global configPath
+	global todoConfigPath
+
+	config = ConfigParser.ConfigParser(allow_no_value=True)
+	config.readfp(open(configPath))
+
+	todoConfig = ConfigParser.ConfigParser(allow_no_value=True)
+	todoConfig.readfp(io.BytesIO('[default]\n' + open(todoConfigPath).read()))
+
+def writeConfig():
+	global config
+	with open(configPath, 'wb') as configfile:
+		config.write(configfile)
+
+def getConfigString(name):
+	global config
+	return config.get("sh-todo", name)
+
+def getTodoConfigString(name):
+	global todoConfig
+	return todoConfig.get("default", name).replace('"', '')
+
+
+def createService():
+	FLAGS = gflags.FLAGS
+
+	# Set up a Flow object to be used if we need to authenticate. This
+	# sample uses OAuth 2.0, and we set up the OAuth2WebServerFlow with
+	# the information it needs to authenticate. Note that it is called
+	# the Web Server Flow, but it can also handle the flow for native
+	# applications
+	# The client_id and client_secret are copied from the API Access tab on
+	# the Google APIs Console
+	FLOW = OAuth2WebServerFlow(
+		client_id='446472169024.apps.googleusercontent.com',
+		client_secret='REml2OCsAyv5-M2CrppgyQnr',
+		scope='https://www.googleapis.com/auth/tasks',
+		user_agent='sh-todo/v1')
+
+	# To disable the local server feature, uncomment the following line:
+	# FLAGS.auth_local_webserver = False
+
+	# If the Credentials don't exist or are invalid, run through the native client
+	# flow. The Storage object will ensure that if successful the good
+	# Credentials will get written back to a file.
+	storage = Storage(os.path.join(homeDirectory, '.sh-todo.gtask.tasks.dat'))
+	credentials = storage.get()
+	if credentials is None or credentials.invalid == True:
+		credentials = run(FLOW, storage)
+
+	# Create an httplib2.Http object to handle our HTTP requests and authorize it
+	# with our good Credentials.
+	http = httplib2.Http()
+	http = credentials.authorize(http)
+
+	# Build a service object for interacting with the API. Visit
+	# the Google APIs Console
+	# to get a developerKey for your own application.
+	service = build(serviceName='tasks', version='v1', http=http,
+		developerKey='goh8Baesie1igh5phaT7ebeiNgou7quu')
+	return service
+
+def getTaskListId(service):
+	todoListName=getConfigString('tasklist-name')
+
+	if todoListName == '@default':
+		return todoListName
+
+	tasklists = service.tasklists().list().execute()
+
+	todoTaskListId = None
+
+	for tasklist in tasklists['items']:
+		#print 'Id=%s %s' % (tasklist['id'], tasklist['title'])
+		if tasklist['title'] == todoListName:
+			todoTaskListId = tasklist['id']
+
+	if todoTaskListId == None:
+		tasklist = {
+					'title': todoListName,
+			}
+		result = service.tasklists().insert(body=tasklist).execute()
+		todoTaskListId = result['id']
+	return todoTaskListId
+
+def readTodoList(filename):
+	todo_prefix = 'TODO '
+	done_prefix = 'DONE '
+
+	result = []
+	with codecs.open(filename, encoding='utf-8') as todo_f:
+		for line in todo_f.readlines():
+			entry={}
+			line = line.replace('\n', '')
+
+			pos = -1
+
+			if line.startswith(todo_prefix):
+				pos = len(todo_prefix)
+				entry['type'] = 'todo'
+			if line.startswith(done_prefix):
+				pos = len(todo_prefix)
+				entry['type'] = 'done'
+
+			if pos > 0:
+				if line[pos] == '|':
+					pos2 = line.find('| ', pos + 1)
+					if pos2 > 0:
+						entry['id'] = line[(pos + 1):pos2]
+						pos = pos2 + 2
+
+				pos_end = len(line)
+
+				if entry['type'] == 'done' and line[len(line)-1] == ')':
+					pos2 = line.rfind('(')
+					if pos2 > 0:
+						entry['date'] = line[pos2+1:pos_end-1]
+						pos_end = pos2 - 1
+				entry['text'] = line[pos:pos_end]
+
+				result.append(entry)
+	return result
+
+def writeTodoList(filename, data):
+	todo_prefix = 'TODO '
+	done_prefix = 'DONE '
+
+	with codecs.open(filename, 'wb', encoding='utf-8') as todo_f:
+		for local in data:
+			if local['type'] == 'todo':
+				prefix = todo_prefix
+				date = ''
+			else:
+				prefix = done_prefix
+				if 'date' in local:
+					date = ' (%s)' % (local['date'])
+				else:
+					date = ''
+			if 'id' in local:
+				objid = '|%s| ' % (local['id'])
+			else:
+				objid = ''
+			todo_f.write('%s%s%s%s\n' % (prefix,objid,local['text'],date))
+
+def makeLocal(remote):
+	global OriginalTimestampFormat;
+	result = {'text':remote['title'],'id':remote['id']}
+	if remote['status'] == 'completed':
+		result['type'] = 'done'
+		dateObject = time.strptime(remote['completed'], RFC3339TimestampFormat)
+		result['date'] = time.strftime(OriginalTimestampFormat, dateObject)
+	else:
+		result['type'] = 'todo'
+	return result
+
+def getTasks(service, tasklist, fatchAll=False):
+	global config
+	if not fatchAll and config.has_option('sh-todo', 'last-sync'):
+		updatedMin=config.get('sh-todo', 'last-sync')
+
+		tasks =  service.tasks().list(
+				tasklist=tasklist['id'],
+				maxResults=10000,
+				showCompleted=True,
+				showHidden=True,
+				updatedMin=updatedMin
+			).execute()
+	else:
+		tasks =  service.tasks().list(
+				tasklist=tasklist['id'],
+				maxResults=10000,
+				showCompleted=True,
+				showHidden=True
+			).execute()
+
+	return tasks
+
+def getRemoteToLocalDifference(gtaskList, todoMap, doneMap):
+	archiveTodo = []
+	removeDone = []
+	newTodo = []
+	newDone = []
+
+	for task in gtaskList:
+		if len(task['title']) > 0:
+			if task['id'] in todoMap:
+				local = todoMap[task['id']]
+				if 'hidden' in task and task['hidden']:
+					archiveTodo.append(task['id'])
+				if task['status'] == 'completed':
+					local['type'] = 'done'
+				else:
+					local['type'] = 'todo'
+				local['text'] = task['title']
+			else:
+				if not ('hidden' in task and task['hidden']):
+					newTodo.append(task['id'])
+
+			if task['id'] in doneMap:
+				local = doneMap[task['id']]
+				if not ('hidden' in task and task['hidden']):
+					removeDone.append(task['id'])
+				if task['status'] == 'completed':
+					local['type'] = 'done'
+				else:
+					local['type'] = 'todo'
+				local['text'] = task['title']
+			else:
+				if task['status'] == 'completed':
+					newDone.append(task['id'])
+
+	return archiveTodo, removeDone, newTodo, newDone
+
+def getRemoteToLocalUpdatedLists(todoList, gtaskMap, doneList, archiveTodo, removeDone, newTodo, newDone):
+	archiveTodo = {id for id in archiveTodo}
+	removeDone = {id for id in removeDone}
+
+	todoListUpdated = [s for s in todoList if not 'id' in s or not (s['id'] in archiveTodo)]
+	doneListUpdated = [s for s in doneList if not 'id' in s or not (s['id'] in removeDone)]
+
+	newTodo.reverse()
+	newDone.reverse()
+
+	for id in newTodo:
+		remote = gtaskMap[id]
+		local = makeLocal(remote)
+		todoListUpdated.append(local)
+		print '"%s" downloaded' % (local['text'])
+
+	for id in newDone:
+		remote = gtaskMap[id]
+		local = makeLocal(remote)
+		doneListUpdated.append(local)
+		print '"%s" downloaded' % (local['text'])
+
+	return todoListUpdated, doneListUpdated
+
+def syncRemoteToLocal(service, tasklist):
+	global config
+	tasks = getTasks(service, tasklist)
+
+	todoList = readTodoList(os.path.expanduser(getTodoConfigString('todo_f')))
+	doneList = readTodoList(os.path.expanduser(getTodoConfigString('todone_f')))
+
+	todoMap = dict((s['id'],s) for s in todoList if 'id' in s)
+	doneMap = dict((s['id'],s) for s in doneList if 'id' in s)
+
+	if 'items' in tasks:
+
+		gtaskList = tasks['items']
+		gtaskMap = dict((s['id'],s) for s in gtaskList )
+
+		archiveTodo, removeDone, newTodo, newDone = getRemoteToLocalDifference(gtaskList, todoMap, doneMap)
+
+		todoListUpdated, doneListUpdated = getRemoteToLocalUpdatedLists(
+				todoList,
+				gtaskMap,
+				doneList,
+				archiveTodo,
+				removeDone,
+				newTodo,
+				newDone
+			)
+
+		writeTodoList(os.path.expanduser(getTodoConfigString('todo_f')), todoListUpdated)
+		writeTodoList(os.path.expanduser(getTodoConfigString('todone_f')), doneListUpdated)
+
+		config.set('sh-todo', 'last-sync', time.strftime(RFC3339TimestampFormatSave, time.gmtime()))
+
+		writeConfig()
+
+def makeRemote(local, hidden):
+	global OriginalTimestampFormat
+	result = {'title':local['text']}
+	if local['type'] == 'done':
+		result['status'] = 'completed'
+		dateObject = time.strptime(local['date'], OriginalTimestampFormat.replace('%R', '%H:%M'))
+		dateObjectUTC = time.gmtime(time.mktime(dateObject))
+		result['completed'] = time.strftime(RFC3339TimestampFormatSave, dateObjectUTC)
+	else:
+		result['status'] = 'needsAction'
+	if hidden:
+		result['hidden'] = True
+	return result
+
+def needUpdateRemote(local, remote):
+	needUpdate = False
+	if local['text'] != remote['title']:
+		remote['title'] = local['text']
+		needUpdate = True
+	if local['type'] == 'todo' and remote['status'] != 'needsAction' :
+		remote['status'] = 'needsAction'
+		needUpdate = True
+	elif local['type'] == 'done' and remote['status'] != 'completed' :
+		remote['status'] = 'completed'
+		needUpdate = True
+	return needUpdate
+
+
+def syncLocalToRemote(service, tasklist):
+	global config
+	tasks = getTasks(service, tasklist, True)
+
+	gtaskList = tasks['items']
+	gtaskMap = dict((s['id'],s) for s in gtaskList )
+
+	todoList = readTodoList(os.path.expanduser(getTodoConfigString('todo_f')))
+	doneList = readTodoList(os.path.expanduser(getTodoConfigString('todone_f')))
+
+	todoMap = dict((s['id'],s) for s in todoList if 'id' in s)
+	doneMap = dict((s['id'],s) for s in doneList if 'id' in s)
+
+	todoNew = [s for s in todoList if not 'id' in s]
+	doneNew = [s for s in doneList if not 'id' in s]
+
+	todoNewMap = dict((s['text'],s) for s in todoNew)
+	doneNewMap = dict((s['text'],s) for s in doneNew)
+
+	throttle = 0
+
+	for local in todoNew:
+		throttle = (throttle + 1) % 4
+		if throttle == 0:
+			time.sleep(1)
+		remote = makeRemote(local, False)
+		result = service.tasks().insert(tasklist=tasklist['id'], body=remote).execute()
+		local['id'] = result['id']
+		print '"%s" uploaded todo' % (local['text'])
+		writeTodoList(os.path.expanduser(getTodoConfigString('todo_f')), todoList)
+
+		if local['type'] == 'done' and local['text'] in doneNewMap:
+			doneNewMap[local['text']]['id'] = result['id']
+			writeTodoList(os.path.expanduser(getTodoConfigString('todone_f')), doneList)
+
+	for local in doneNew:
+		if not local['text'] in todoNewMap:
+			throttle = (throttle + 1) % 4
+			if throttle == 0:
+				time.sleep(1)
+			remote = makeRemote(local, True)
+			result = service.tasks().insert(tasklist=tasklist['id'], body=remote).execute()
+			local['id'] = result['id']
+			print '"%s" uploaded todone' % (local['text'])
+			writeTodoList(os.path.expanduser(getTodoConfigString('todone_f')), doneList)
+
+	for local in [s for s in todoList if 'id' in s]:
+		if local['id'] in gtaskMap:
+			remote = gtaskMap[local['id']]
+			needUpdate = needUpdateRemote(local, remote)
+			if needUpdate:
+				print remote
+				service.tasks().update(tasklist=tasklist['id'], task=remote['id'], body=remote).execute()
+				print '"%s" updated todo' % (remote['title'])
+
+	for local in [s for s in doneList if 'id' in s]:
+		if local['id'] in gtaskMap and not local['id'] in todoMap:
+			remote = gtaskMap[local['id']]
+			needUpdate = needUpdateRemote(local, remote)
+			if needUpdate:
+				service.tasks().update(tasklist=tasklist['id'], task=remote['id'], body=remote).execute()
+				print '"%s" updated todone' % (remote['title'])
+
+	writeConfig()
+
+def main():
+	readConfig()
+	service = createService()
+	todoTaskListId = getTaskListId(service)
+	tasklist = service.tasklists().get(tasklist=todoTaskListId).execute()
+	syncRemoteToLocal(service, tasklist)
+	syncLocalToRemote(service, tasklist)
+
+if __name__ == "__main__":
+	main()

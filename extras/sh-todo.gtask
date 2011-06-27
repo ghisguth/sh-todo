@@ -1,0 +1,4 @@
+[sh-todo]
+tasklist-name = TODO
+;tasklist-name = @default
+

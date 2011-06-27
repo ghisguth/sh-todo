@@ -1,0 +1,3 @@
+#!/bin/bash
+
+todone "$*" | sed -e 's/|[^|]*| //g'

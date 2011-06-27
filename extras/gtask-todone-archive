@@ -1,0 +1,3 @@
+#!/bin/bash
+
+todone-archive | sed -e 's/|[^|]*| //g'
