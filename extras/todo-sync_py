@@ -374,7 +374,6 @@ def syncLocalToRemote(service, tasklist):
 			remote = gtaskMap[local['id']]
 			needUpdate = needUpdateRemote(local, remote)
 			if needUpdate:
-				print remote
 				service.tasks().update(tasklist=tasklist['id'], task=remote['id'], body=remote).execute()
 				print '"%s" updated todo' % (remote['title'])
 
